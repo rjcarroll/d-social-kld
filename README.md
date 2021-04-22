@@ -7,3 +7,9 @@ This repository contains replication code for D-SOCIAL-KLD scores ([Carroll, Pri
 Files in this directory include:
 
   - `README.md`: this file
+  - `LICENSE`: license information
+  - `01-cleanKLD.R`: a script for converting off-the-shelf KLD data into workable form for the `MCMCpack` routine; 
+  - `02-getIdeals.R`: the script calling `MCMCpack::MCMCdynamicIRT1d`, which actually gets more than just the ideal points; 
+  - `03-pullThetas.R`: the script pulling/cleaning the D-SOCIAL-KLD scores; 
+  - `fn-get_start_values.R`: a helper function for starting values in the `MCMCpack::MCMCdynamicIRT1d` call;
+  - `d-social-kld_summary-stats.csv`: summary statistics for the posterior distributions.
