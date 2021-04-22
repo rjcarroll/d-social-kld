@@ -19,11 +19,13 @@ The data with all 2500 pulls from the posterior are [too large to be added here]
 
 The most recent analysis was conducted in April 2021.
 The analysis was conducted in [R (Version 4.0.5)](https://cran.r-project.org/).
-The only package dependencies are:
+The only high-level package dependencies are:
 
   - `tidyverse` (Version 1.3.0);
   - `foreach` (Version 1.5.1); and
   - `MCMCpack` (Version 1.5-0).
+
+Of course, these establish their own dependences, most notably `MASS` and `coda` for `MCMCpack` and all the usual suspects (`dplyr`, `tidyr`, etc.) for `tidyverse`.
 
 ## Notes
 
