@@ -1,6 +1,6 @@
 # d-social-kld
 
-This repository contains replication code for D-SOCIAL-KLD scores ([Carroll, Primo, & Richter 2016](https://onlinelibrary.wiley.com/doi/full/10.1002/smj.2463)).
+This repository contains replication code for D-SOCIAL-KLD scores ([Carroll, Primo, & Richter 2016](https://onlinelibrary.wiley.com/doi/full/10.1002/smj.2463)) using KLD data that runs through the year 2018.
 
 ## Files
 
