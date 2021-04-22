@@ -1,2 +1,3 @@
 # d-social-kld
-replication code for creating d-social-kld scores (Carroll, Primo, &amp; Richter 2016)
+
+This repository contains replication code for D-SOCIAL-KLD scores [https://onlinelibrary.wiley.com/doi/full/10.1002/smj.2463](Carroll, Primo, & Richter 2016).
