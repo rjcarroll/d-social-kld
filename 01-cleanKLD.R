@@ -22,7 +22,7 @@
 
     # read in data
     kld <- 
-      read_csv(file      = "kld_stats_all_through_2018.csv",
+      read_csv(file      = "KLD_stats_all_through_2018.csv",
                na        = c("", "R", "NA"),
                # the following variables are wonky and not of use:
                col_types = cols('CUSIP'            = col_skip(),
