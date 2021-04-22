@@ -25,3 +25,8 @@ The only package dependencies are:
   - `tidyverse` (Version 1.3.0);
   - `foreach` (Version 1.5.1); and
   - `MCMCpack` (Version 1.5-0).
+
+## Notes
+
+  - There are well-known and oft-lamented classes between `dplyr::select` and the `MASS` package called in `MCMCpack`. We've tried to minimize errors, but the occasional sequencing error may have slipped through here or there.
+  - Several firms from distinct KLD "domiciles" share the same ticker symbol. In these cases, the newer-to-the-dataset firm is assigned a random four-character tag placed after a double-tilde separator. So, if two firms both have ticker symbol `Z`, then the older-to-the-dataset firm remains `Z` and the newer-to-the-dataset firm is assigned ticker `Z~~abcd`, where `abcd` may be any random tag of four lowercase letters. Those that read the code in `01-cleanKLD.R` carefully will see that several precautions were taken to ensure continuity across these tags. However, should you find any errors, please do not hesitate to drop a line or issue a pull request. 
