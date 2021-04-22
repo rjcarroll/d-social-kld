@@ -37,3 +37,6 @@ vignettes/*.pdf
 
 # R Environment Variables
 .Renviron
+
+# KLD data (proprietary)
+KLD_stats_all_through_2018.csv
