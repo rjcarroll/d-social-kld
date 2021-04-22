@@ -40,3 +40,4 @@ vignettes/*.pdf
 
 # KLD data (proprietary)
 KLD_stats_all_through_2018.csv
+firm-year-level.csv

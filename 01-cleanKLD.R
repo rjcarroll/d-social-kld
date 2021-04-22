@@ -671,6 +671,10 @@
       unite(id, ticker, year, remove = FALSE) %>% 
       distinct(id, .keep_all = TRUE) %>% 
       select(-id)
+    
+    # useful to have this data for merging
+    write_csv(x    = kld,
+              file = "firm-year-level.csv")
 
 #   ____________________________________________________________________________
 #   execute the reshape                                                     ####
