@@ -13,3 +13,10 @@ Files in this directory include:
   - `03-pullThetas.R`: the script pulling/cleaning the D-SOCIAL-KLD scores; 
   - `fn-get_start_values.R`: a helper function for starting values in the `MCMCpack::MCMCdynamicIRT1d` call;
   - `d-social-kld_summary-stats.csv`: summary statistics for the posterior distributions.
+
+The data with all 2500 pulls from the posterior are [too large to be added here](https://docs.github.com/en/github/managing-large-files/conditions-for-large-files), so please check [socialscores.org](http://socialscores.org/) for updates.
+
+## Installation
+
+The most recent analysis was conducted in April 2021.
+Here is another line.
