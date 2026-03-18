@@ -1,0 +1,28 @@
+# ----- proprietary data -----
+data/kld/
+data/intermediate/
+
+# ----- large MCMC output -----
+# Posterior draws are too large for GitHub; summary statistics in data/output/
+# are committed instead. Full draws will be made available at socialscores.org.
+*.RData
+
+# ----- R -----
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# ----- logs -----
+logs/
+
+# ----- compiled Stan binaries -----
+stan/dynamic_irt
+stan/*.hpp
+
+# ----- OS -----
+.DS_Store
+Thumbs.db
+
+# ----- readings (licensed PDFs) -----
+readings/
