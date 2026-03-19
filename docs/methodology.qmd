@@ -1,0 +1,213 @@
+---
+title: "D-SOCIAL-KLD: Measuring Corporate Social Responsibility with Dynamic IRT"
+author: "Robert J. Carroll"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: true
+    theme: cosmo
+    self-contained: true
+bibliography: references.bib
+---
+
+## The measurement problem
+
+Corporate social responsibility (CSR) is a latent construct.
+We do not observe a firm's CSR directly; instead, we observe dozens of binary indicators---strengths and concerns---coded by ratings agencies like KLD (now MSCI ESG).
+The question is how to aggregate these indicators into a single score.
+
+The standard approach in the management literature is the **KLD Index**: sum the strengths, subtract the concerns.
+This treats every indicator as equally informative, which is a strong and often implausible assumption.
+A strength that virtually every firm earns (e.g., a basic governance policy) tells us much less than one that only the most responsible firms achieve.
+An additive index cannot distinguish between these cases.
+
+**Item response theory** (IRT) offers a principled alternative.
+Originally developed in psychometrics to score examinees on standardized tests, IRT models the probability of a binary response as a function of the respondent's latent trait and the item's statistical properties.
+The analogy is direct: firms are examinees, KLD indicators are test items, and the latent trait is CSR.
+
+This document describes the dynamic IRT model used to produce D-SOCIAL-KLD scores, covering the model specification, identification strategy, estimation, and key implementation decisions.
+The original measure was introduced in @carroll2016irt; this implementation extends coverage through 2018 and re-estimates the model using Stan's Hamiltonian Monte Carlo sampler.
+
+
+## Model specification
+
+### The two-parameter probit IRT model {#sec-model}
+
+For each observed triple of firm $i$, KLD indicator $j$, and year $t$, the model specifies:
+
+$$
+y_{ijt} \sim \text{Bernoulli}\bigl(\Phi(\beta_{jt} \cdot \theta_{it} - \alpha_{jt})\bigr)
+$$ {#eq-likelihood}
+
+where:
+
+- $\theta_{it}$ is the **latent CSR score** for firm $i$ in year $t$---the quantity of interest.
+- $\alpha_{jt}$ is the **difficulty** of indicator $j$ in year $t$: how much underlying CSR a firm needs to have a 50% probability of being coded 1 on this indicator, all else equal. Higher $\alpha$ means fewer firms are coded 1 (the indicator is "harder" to earn or harder to avoid).
+- $\beta_{jt}$ is the **discrimination** of indicator $j$ in year $t$: how steeply the probability of a 1 changes as $\theta$ increases. Strength indicators tend to have $\beta > 0$ (more-responsible firms are more likely to earn the strength). Concern indicators tend to have $\beta < 0$ (more-responsible firms are less likely to have the concern).
+- $\Phi(\cdot)$ is the standard normal CDF (probit link).
+
+The discrimination parameter $\beta$ is what makes IRT superior to an additive index.
+An indicator with $|\beta| \approx 0$ contributes almost nothing to the score; one with large $|\beta|$ is highly informative.
+The model estimates these weights from the data rather than assuming they are equal.
+
+### Dynamic prior on $\theta$ {#sec-dynamic}
+
+A static IRT model would treat each year as an independent cross-section, discarding the information that a firm rated highly in 2005 is likely to be rated highly in 2006.
+The **dynamic** extension imposes a random-walk prior on $\theta$:
+
+$$
+\theta_{i, t_0} \sim \text{Normal}(0, \sigma_{\text{init}})
+$$ {#eq-init}
+
+$$
+\theta_{i,t} \mid \theta_{i,t-1} \sim \text{Normal}(\theta_{i,t-1}, \sigma_{\text{firm},i})
+$$ {#eq-transition}
+
+The firm-specific innovation standard deviation $\sigma_{\text{firm},i}$ governs how quickly each firm's CSR position can change year to year.
+A firm with small $\sigma_{\text{firm}}$ has a CSR trajectory that is relatively stable; a firm with large $\sigma_{\text{firm}}$ can shift rapidly.
+
+Rather than estimating each $\sigma_{\text{firm},i}$ in isolation, we use **partial pooling** via a hierarchical prior:
+
+$$
+\sigma_{\text{firm},i} \sim \text{Half-Normal}(0, \sigma_{\text{global}})
+$$
+
+$$
+\sigma_{\text{global}} \sim \text{Half-Normal}(0, 1)
+$$
+
+This structure lets the model learn from the full cross-section of firms what a "typical" rate of change looks like, while still allowing individual firms to deviate from that baseline.
+The result is a Bayesian shrinkage estimator: firms with limited data are pulled toward the group mean rate of change, while firms with abundant data are estimated more freely.
+
+### Item priors
+
+The difficulty and discrimination parameters receive mildly regularizing priors:
+
+$$
+\alpha_{jt} \sim \text{Normal}(0, 5) \qquad \beta_{jt} \sim \text{Normal}(0, 2.5)
+$$
+
+These are wide enough to let the data drive the estimates while preventing extreme values that could destabilize the sampler.
+
+
+## Identification {#sec-identification}
+
+IRT models are identified only up to a **reflection** (multiplying all $\theta$ by $-1$ and all $\beta$ by $-1$ gives the same likelihood) and a **scale** (the units of $\theta$ are arbitrary without a reference point).
+
+We fix both by constraining two **anchor firms**:
+
+| Anchor | Constraint | Rationale |
+|--------|-----------|-----------|
+| Halliburton (HAL) | $\theta_{\text{HAL},t} < 0 \;\forall\; t$ | Consistently associated with environmental and governance controversies; used as the negative anchor in @carroll2016irt |
+| Abbott Laboratories (ABT) | $\theta_{\text{ABT},t} > 0 \;\forall\; t$ | Consistently ranked among top corporate citizens in major CSR indices (DJSI, MSCI, Fortune) |
+
+Both anchors have non-missing KLD indicator data for the full 1991--2018 panel, making them robust reference points across the entire estimation window.
+The sign constraints are encoded directly in the Stan parameter declarations; Stan applies the appropriate Jacobian adjustments for the truncation automatically.
+
+::: {.callout-note}
+The original paper used Microsoft (MSFT) as the positive anchor.
+MSFT lacks KLD indicator data before 2010, making it unsuitable for the full panel.
+Johnson & Johnson (JNJ) was considered as a replacement but also lacks data before 2001.
+ABT has complete coverage and a strong, well-documented CSR record throughout the period.
+:::
+
+
+## Estimation
+
+### From Gibbs to HMC
+
+The original D-SOCIAL-KLD scores were estimated using `MCMCpack::MCMCdynamicIRT1d` in R, which implements a Gibbs sampler with data augmentation following @martin2002dynamic.
+Gibbs sampling has several limitations for a model of this size:
+
+1. **High autocorrelation**: Gibbs draws are serially correlated because each parameter is updated conditional on all others. Effective sample sizes are often a small fraction of the nominal chain length.
+2. **No built-in diagnostics**: convergence must be assessed post hoc, typically by informal visual inspection of trace plots.
+3. **Difficult to parallelize**: Gibbs updates are inherently sequential; running multiple chains requires separate processes with no communication.
+
+This implementation uses **Stan** [@carpenter2017stan], which employs the No-U-Turn Sampler (NUTS), an adaptive variant of Hamiltonian Monte Carlo (HMC) [@hoffman2014nuts].
+HMC uses gradient information to make large, low-autocorrelation moves through the posterior, resulting in dramatically higher effective sample sizes per draw.
+Stan also provides:
+
+- **Automatic diagnostics**: divergent transitions, R-hat, bulk and tail effective sample size
+- **Parallel chains**: multiple chains run simultaneously, enabling both faster estimation and formal convergence assessment
+- **Pointwise log-likelihood**: computed in the `generated quantities` block for leave-one-out cross-validation via the `loo` package [@vehtari2017loo]
+
+
+### Implementation details
+
+The Stan model (`stan/dynamic_irt.stan`) uses several techniques to handle the scale of the problem:
+
+**Sparse data representation.**
+The KLD panel is highly sparse: firms enter and exit the database, and the set of indicators changes over time.
+Rather than passing the full firm $\times$ indicator $\times$ year array to Stan (which would be mostly NA), the R preprocessing scripts convert the data to a flat list of non-missing $(i, j, t, y)$ tuples.
+This reduces the data footprint from millions of potential cells to the ~500K--1.5M actually observed.
+
+**Split parameter vectors for identification.**
+The $\theta$ vector is declared as three sub-vectors in Stan:
+
+```stan
+vector[N_fy_free]           theta_free;  // unconstrained firms
+vector<upper=0>[N_fy_hal]   theta_hal;   // HAL: negative
+vector<lower=0>[N_fy_abt]   theta_abt;   // ABT: positive
+```
+
+These are assembled into a single `theta` vector in the `transformed parameters` block.
+Stan handles the Jacobian adjustments for the bounded parameters automatically.
+
+**Initialization.**
+All chains are initialized at zero on the unconstrained scale (`init = 0`).
+This is necessary because Stan's default random initialization can place consecutive $\theta$ values for the same firm far apart (e.g., $\theta_{i,2005} = -7$ and $\theta_{i,2006} = +2$ by chance), making the transition prior $\text{Normal}(\theta_{i,2005}, \sigma_{\text{firm}})$ evaluate to $-\infty$ in double precision and preventing the chain from starting.
+
+**Numerical stability.**
+The scale parameters $\sigma_{\text{firm}}$, $\sigma_{\text{global}}$, and $\sigma_{\text{init}}$ are declared with a small positive lower bound (`lower = 1e-8`) rather than `lower = 0`.
+This prevents HMC leapfrog steps from pushing these parameters to values so small that $\exp(\cdot)$ underflows to exactly zero, which would make the `normal_lpdf` undefined.
+
+
+## Data
+
+### Source
+
+The raw data come from KLD STATS (now MSCI ESG), a panel of binary CSR indicators for publicly traded U.S. firms.
+The dataset used here covers **1991--2018** and is available through Wharton Research Data Services (WRDS).
+KLD indicators are organized into categories (community, diversity, employee relations, environment, human rights, product) and coded as either strengths or concerns.
+
+### Preprocessing
+
+The cleaning pipeline (`R/01-clean.R`) handles several data-quality issues:
+
+1. **Non-binary values**: a small number of indicator values exceed 1 (e.g., `HUM_str_num = 2`). These are clamped to 1.
+2. **Ticker disambiguation**: KLD's coverage expanded over time, and different firms occasionally share the same ticker symbol across coverage universes. The disambiguation uses `issuerid` where available (2017--2018) and deterministic numeric suffixes (`.2`, `.3`, ...) for earlier years. See `R/utils.R` for the full logic.
+3. **Time-varying indicator sets**: not all indicators appear in all years. Columns that are entirely NA in a given year are excluded from that year's item set.
+4. **Universe restriction**: the estimation sample is restricted to firms present in the KLD database by 2012, ensuring comparability with the original published scores.
+
+### Scale and sparsity
+
+The full panel contains roughly 6,300 unique firms, 2,000+ indicator-year combinations, and 1.5 million non-missing observations.
+Coverage is uneven: the early KLD years (1991--2000) include ~650 firms per year; later years include 3,000+.
+Many prominent firms (e.g., IBM, Coca-Cola) have surprisingly sparse indicator data in certain periods, reflecting KLD's evolving coverage universe rather than missing observations in the usual sense.
+
+
+## Interpreting the output
+
+### Scores ($\theta$)
+
+The primary output is a posterior distribution over $\theta_{it}$ for each firm-year.
+The file `data/output/d-social-kld_scores.csv` reports the posterior mean, standard deviation, and percentiles.
+
+Key properties:
+
+- **Centered near zero**: by construction, the distribution of scores in any given year has mean near zero. Positive scores indicate above-median CSR; negative scores indicate below-median.
+- **Interval-scaled**: differences between scores are meaningful (a firm at +1.5 has measurably higher CSR than a firm at +0.5), but ratios are not (a score of +2 does not mean "twice as responsible" as +1).
+- **Uncertainty quantified**: the posterior SD for each firm-year is an explicit measure of estimation uncertainty. Firms with more indicators observed in a given year will have smaller SDs (more precise scores). Researchers should propagate this uncertainty into downstream analyses.
+
+### Item parameters ($\alpha$, $\beta$)
+
+The file `data/output/d-social-kld_item-params.csv` reports posterior summaries for each indicator's difficulty and discrimination.
+These are useful for understanding which KLD indicators are most informative about the latent CSR dimension and how the indicator set has evolved over time.
+
+
+## References
+
+::: {#refs}
+:::

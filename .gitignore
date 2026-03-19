@@ -16,6 +16,9 @@ data/intermediate/
 # ----- logs -----
 logs/
 
+# ----- rendered docs (rebuild with `quarto render docs/`) -----
+docs/*.html
+
 # ----- compiled Stan binaries -----
 stan/dynamic_irt
 stan/*.hpp
