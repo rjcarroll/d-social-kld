@@ -100,10 +100,12 @@ We fix both by constraining two **anchor firms**:
 
 | Anchor | Constraint | Rationale |
 |--------|-----------|-----------|
-| Halliburton (HAL) | $\theta_{\text{HAL},t} < 0 \;\forall\; t$ | Consistently associated with environmental and governance controversies; used as the negative anchor in @carroll2016irt |
-| Abbott Laboratories (ABT) | $\theta_{\text{ABT},t} > 0 \;\forall\; t$ | Consistently ranked among top corporate citizens in major CSR indices (DJSI, MSCI, Fortune) |
+| Halliburton (HAL) | $\theta_{\text{HAL},t_0} < 0$ | Consistently associated with environmental and governance controversies; used as the negative anchor in @carroll2016irt |
+| Abbott Laboratories (ABT) | $\theta_{\text{ABT},t_0} > 0$ | Consistently ranked among top corporate citizens in major CSR indices (DJSI, MSCI, Fortune) |
 
-Both anchors have non-missing KLD indicator data for the full 1991--2018 panel, making them robust reference points across the entire estimation window.
+where $t_0$ denotes each anchor firm's first appearance in the data.
+The constraint applies only to the first-year score; subsequent years evolve freely under the dynamic prior.
+This is sufficient to fix the reflection and scale: with the first year pinned, the direction of the latent dimension is determined throughout the panel via the random-walk continuity of $\theta$.
 The sign constraints are encoded directly in the Stan parameter declarations; Stan applies the appropriate Jacobian adjustments for the truncation automatically.
 
 ::: {.callout-note}
@@ -131,7 +133,7 @@ Stan also provides:
 
 - **Automatic diagnostics**: divergent transitions, R-hat, bulk and tail effective sample size
 - **Parallel chains**: multiple chains run simultaneously, enabling both faster estimation and formal convergence assessment
-- **Pointwise log-likelihood**: computed in the `generated quantities` block for leave-one-out cross-validation via the `loo` package [@vehtari2017loo]
+- **Pointwise log-likelihood**: can be computed in a `generated quantities` block for leave-one-out cross-validation via the `loo` package [@vehtari2017loo]. This block is omitted from the primary model file because storing an $N$-length vector per posterior draw exhausts memory for the full KLD dataset (~1.5M observations). LOO diagnostics should be computed on a subsample or via moment matching.
 
 
 ### Implementation details
@@ -143,25 +145,31 @@ The KLD panel is highly sparse: firms enter and exit the database, and the set o
 Rather than passing the full firm $\times$ indicator $\times$ year array to Stan (which would be mostly NA), the R preprocessing scripts convert the data to a flat list of non-missing $(i, j, t, y)$ tuples.
 This reduces the data footprint from millions of potential cells to the ~500K--1.5M actually observed.
 
-**Split parameter vectors for identification.**
-The $\theta$ vector is declared as three sub-vectors in Stan:
+**Non-centered parameterization (NCP).**
+The centered form of the dynamic prior creates a funnel geometry in the joint posterior: when $\sigma_{\text{global}}$ is small, $\sigma_{\text{firm}}$ must be small, and when $\sigma_{\text{firm}}$ is small, consecutive $\theta$ values must be nearly identical. HMC must take extremely small leapfrog steps to navigate this narrow funnel, resulting in nearly all transitions hitting the maximum treedepth and near-zero E-BFMI values.
 
-```stan
-vector[N_fy_free]           theta_free;  // unconstrained firms
-vector<upper=0>[N_fy_hal]   theta_hal;   // HAL: negative
-vector<lower=0>[N_fy_abt]   theta_abt;   // ABT: positive
-```
+The NCP decouples these hierarchical dependencies by introducing raw standard-normal innovation parameters and treating $\theta$ as a deterministic function in `transformed parameters`:
 
-These are assembled into a single `theta` vector in the `transformed parameters` block.
-Stan handles the Jacobian adjustments for the bounded parameters automatically.
+$$
+\sigma_{\text{firm},i} = \sigma_{\text{global}} \cdot \tilde{\sigma}_i, \qquad \tilde{\sigma}_i \sim \text{Half-Normal}(0,1)
+$$
+
+$$
+\theta_{i,t_0} = \sigma_{\text{init}} \cdot z^{\text{init}}_i, \qquad z^{\text{init}}_i \sim \text{Normal}(0,1)
+$$
+
+$$
+\theta_{i,t} = \theta_{i,t-1} + \sigma_{\text{firm},i} \cdot z^{\text{trans}}_{i,t}, \qquad z^{\text{trans}}_{i,t} \sim \text{Normal}(0,1)
+$$
+
+(with the exception of the anchor firms' first-year scores, which are declared as bounded scalar parameters as described in @sec-identification).
+The $\theta$ vector is assembled sequentially in the `transformed parameters` block by processing transitions in chronological order within each firm.
+Firm-years that follow gaps in the panel (i.e., years that are not consecutive transitions) receive the same $\sigma_{\text{init}} \cdot z$ initialization as first appearances.
 
 **Initialization.**
 All chains are initialized at zero on the unconstrained scale (`init = 0`).
-This is necessary because Stan's default random initialization can place consecutive $\theta$ values for the same firm far apart (e.g., $\theta_{i,2005} = -7$ and $\theta_{i,2006} = +2$ by chance), making the transition prior $\text{Normal}(\theta_{i,2005}, \sigma_{\text{firm}})$ evaluate to $-\infty$ in double precision and preventing the chain from starting.
-
-**Numerical stability.**
-The scale parameters $\sigma_{\text{firm}}$, $\sigma_{\text{global}}$, and $\sigma_{\text{init}}$ are declared with a small positive lower bound (`lower = 1e-8`) rather than `lower = 0`.
-This prevents HMC leapfrog steps from pushing these parameters to values so small that $\exp(\cdot)$ underflows to exactly zero, which would make the `normal_lpdf` undefined.
+Under NCP, this places all $z$ innovations at zero, so every $\theta$ starts at zero (except HAL at $-1$ and ABT at $+1$, from the bounded-parameter transformations at `unconstrained = 0`).
+This avoids the initialization failures that arise with random starts when the dynamic prior drives $\log p$ to $-\infty$.
 
 
 ## Data

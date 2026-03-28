@@ -1,6 +1,5 @@
-# ----- proprietary data -----
-data/kld/
-data/intermediate/
+# ----- data (all ignored; outputs committed once finalized) -----
+data/
 
 # ----- large MCMC output -----
 # Posterior draws are too large for GitHub; summary statistics in data/output/

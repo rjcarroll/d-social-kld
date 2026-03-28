@@ -37,7 +37,7 @@ source("R/utils.R")
 # demo_years controls which calendar years to include. The smaller the range,
 # the faster the run — the early KLD years (1991–2000) cover only ~650 firms,
 # making them a good smoke-test. Set to NULL to use all available years.
-demo_mode  <- TRUE
+demo_mode  <- FALSE
 demo_years <- 1991:2000
 
 # MCMC settings. Defaults match the original Carroll et al. (2016) paper:
@@ -158,22 +158,41 @@ stopifnot(
     anchor_pos %in% fy_tbl$ticker
 )
 
-hal_fy_idx  <- filter(fy_tbl, ticker == anchor_neg) |> pull(fy_idx)
-abt_fy_idx  <- filter(fy_tbl, ticker == anchor_pos) |> pull(fy_idx)
-free_fy_idx <- filter(fy_tbl, !ticker %in% c(anchor_neg, anchor_pos)) |>
-  pull(fy_idx)
-
 # ── dynamic model arrays ──────────────────────────────────────────────────────
 
 message("Building dynamic model arrays...")
 
-# First appearances (no prior year for this firm).
-init_fy_idx <-
+# "Fresh start" firm-years: first appearances AND years immediately following
+# a gap in a firm's panel history. In the NCP model, theta is built
+# deterministically in transformed parameters, so every fy_idx must be covered
+# by either an init assignment or a transition. Gap years are not connected by
+# transitions (build_transitions only links consecutive years), so they must be
+# treated as additional fresh starts.
+fresh_fy_tbl <-
   fy_tbl |>
   arrange(ticker, year_idx) |>
   group_by(ticker) |>
-  slice(1L) |>
-  ungroup() |>
+  mutate(prev_year = lag(year_idx),
+         is_fresh  = is.na(prev_year) | year_idx > prev_year + 1L) |>
+  filter(is_fresh) |>
+  ungroup()
+
+# The identification constraints apply only to the anchors' first appearances.
+# Anchor gap years (if any) go into other_init_fy and are treated as free.
+hal_first_year <- filter(fresh_fy_tbl, ticker == anchor_neg) |>
+  pull(year_idx) |> min()
+abt_first_year <- filter(fresh_fy_tbl, ticker == anchor_pos) |>
+  pull(year_idx) |> min()
+
+hal_init_fy_idx   <- filter(fresh_fy_tbl,
+                              ticker == anchor_neg, year_idx == hal_first_year) |>
+  pull(fy_idx)
+abt_init_fy_idx   <- filter(fresh_fy_tbl,
+                              ticker == anchor_pos, year_idx == abt_first_year) |>
+  pull(fy_idx)
+other_init_fy_idx <- filter(fresh_fy_tbl,
+                              !(ticker == anchor_neg & year_idx == hal_first_year),
+                              !(ticker == anchor_pos & year_idx == abt_first_year)) |>
   pull(fy_idx)
 
 # Consecutive transitions.
@@ -188,26 +207,21 @@ model <- cmdstan_model(stan_file = "stan/dynamic_irt.stan")
 
 stan_data <- list(
 
-  N          = nrow(obs),
-  N_fy       = nrow(fy_tbl),
-  N_fy_free  = length(free_fy_idx),
-  N_fy_hal   = length(hal_fy_idx),
-  N_fy_abt   = length(abt_fy_idx),
-  N_items    = nrow(item_tbl),
-  N_firms    = nrow(firm_tbl),
+  N        = nrow(obs),
+  N_fy     = nrow(fy_tbl),
+  N_items  = nrow(item_tbl),
+  N_firms  = nrow(firm_tbl),
 
-  y          = obs$y,
-  fy_obs     = obs$fy_idx,
-  it_obs     = obs$item_idx,
+  y      = obs$y,
+  fy_obs = obs$fy_idx,
+  it_obs = obs$item_idx,
 
-  fy_firm    = fy_tbl$firm_idx,
+  fy_firm = fy_tbl$firm_idx,
 
-  free_to_fy = free_fy_idx,
-  hal_to_fy  = hal_fy_idx,
-  abt_to_fy  = abt_fy_idx,
-
-  N_init     = length(init_fy_idx),
-  init_fy    = init_fy_idx,
+  hal_init_fy   = hal_init_fy_idx,
+  abt_init_fy   = abt_init_fy_idx,
+  N_init_other  = length(other_init_fy_idx),
+  other_init_fy = other_init_fy_idx,
 
   N_trans    = nrow(trans_tbl),
   trans_prev = trans_tbl$trans_prev,
@@ -240,6 +254,9 @@ saveRDS(
 
 message(sprintf("[%s] Starting MCMC... (this may take many hours on the full dataset)", Sys.time()))
 
+t_mcmc_start <- proc.time()
+
+dir.create("data/intermediate/chains", recursive = TRUE, showWarnings = FALSE)
 fit <- model$sample(
   data            = stan_data,
   seed            = mcmc_seed,
@@ -248,14 +265,68 @@ fit <- model$sample(
   iter_warmup     = n_warmup,
   iter_sampling   = n_iter,
   thin            = n_thin,
-  adapt_delta     = 0.9,   # slightly conservative; helps with the dynamic prior geometry
+  adapt_delta     = 0.9,
   max_treedepth   = 10,
-  init            = 0,     # all unconstrained parameters start at 0; this avoids the
-                           # dynamic-prior initialization failure that occurs when Stan's
-                           # default U(-2, 2) draws give wildly different theta values for
-                           # consecutive years of the same firm, driving normal_lpdf to -Inf
-  refresh         = 10
+  init            = 0,
+  refresh         = 10,
+  output_dir      = "data/intermediate/chains"
 )
+
+t_mcmc_elapsed <- (proc.time() - t_mcmc_start)[["elapsed"]]
+
+# ── timing summary ──────────────────────────────────────────────────────────
+#
+# Per-chain wall-clock times from Stan, plus projections for larger runs.
+
+chain_times <- fit$time()$chains
+total_iter  <- n_warmup + n_iter
+
+message("\n── Timing ──────────────────────────────────────────────────")
+message(sprintf("  Wall clock (R):       %.1f s", t_mcmc_elapsed))
+message(sprintf("  Observations:         %s", format(stan_data$N, big.mark = ",")))
+message(sprintf("  Firm-years:           %s", format(stan_data$N_fy, big.mark = ",")))
+message(sprintf("  Items:                %d", stan_data$N_items))
+message(sprintf("  Chains:               %d", n_chains))
+message(sprintf("  Iterations per chain: %d (%d warmup + %d sampling)",
+                total_iter, n_warmup, n_iter))
+
+# Per-chain breakdown.
+for (i in seq_len(nrow(chain_times))) {
+  message(sprintf(
+    "  Chain %d: %.1f s warmup, %.1f s sampling, %.1f s total",
+    i, chain_times$warmup[i], chain_times$sampling[i],
+    chain_times$total[i]
+  ))
+}
+
+# Cost per iteration (using the slowest chain, since chains run in parallel).
+slowest    <- max(chain_times$total)
+sec_per_it <- slowest / total_iter
+message(sprintf(
+  "  Slowest chain: %.2f s/iteration (%.1f ms per obs per iteration)",
+  sec_per_it, sec_per_it / stan_data$N * 1000
+))
+
+# Projection for full run (1991-2018).
+full_obs <- 1.5e6   # approximate non-missing obs in full panel
+full_warmup  <- 1000L
+full_sampling <- 1500L
+full_iter <- full_warmup + full_sampling
+proj_sec  <- sec_per_it * (full_obs / stan_data$N) * full_iter
+message(sprintf(
+  "\n  ── Projection for full run (%.0fM obs, %d iterations) ──",
+  full_obs / 1e6, full_iter
+))
+message(sprintf("  Estimated: %.1f hours (%.1f days)",
+                proj_sec / 3600, proj_sec / 86400))
+message("  (Rough: assumes linear scaling in obs and iterations.)")
+
+# ── save fit ──────────────────────────────────────────────────────────────────
+#
+# Save before diagnostics so the fit is never lost to a downstream memory error.
+
+message(sprintf("[%s] Saving fit object...", Sys.time()))
+fit$save_object(file = "data/intermediate/stan-fit.rds")
 
 # ── basic diagnostics ─────────────────────────────────────────────────────────
 #
@@ -264,10 +335,12 @@ fit <- model$sample(
 #   - R-hat < 1.01 for all parameters
 #   - Bulk and tail ESS > 100 per chain (ideally > 400 total)
 
-message(sprintf("\n[%s] ── Sampler diagnostics ──────────────────────────────────────────────", Sys.time()))
+message(sprintf(
+  "\n[%s] ── Sampler diagnostics ──────────────────────────────",
+  Sys.time()
+))
 fit$diagnostic_summary()
 
-# A detailed diagnostics table for key parameters (theta, alpha, beta).
 diag_tbl <- fit$summary(
   variables = NULL,
   "mean", "sd", "rhat", "ess_bulk", "ess_tail"
@@ -282,10 +355,5 @@ message(sprintf(
   min(diag_tbl$ess_bulk, na.rm = TRUE),
   min(diag_tbl$ess_tail, na.rm = TRUE)
 ))
-
-# ── save fit ──────────────────────────────────────────────────────────────────
-
-message(sprintf("[%s] Saving fit object...", Sys.time()))
-fit$save_object(file = "data/intermediate/stan-fit.rds")
 
 message(sprintf("[%s] 02-estimate.R complete.", Sys.time()))

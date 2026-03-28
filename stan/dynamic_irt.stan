@@ -41,10 +41,6 @@
 //     sigma_global   ~ HalfNormal(0, 1)
 //     sigma_init     ~ HalfNormal(0, 1)
 //
-//   This structure lets the model learn how quickly each firm's CSR position
-//   moves over time, while sharing information across firms about the typical
-//   rate of change.
-//
 // ── Item priors ─────────────────────────────────────────────────────────────
 //
 //   alpha[j,t] ~ Normal(0, 5)
@@ -56,36 +52,55 @@
 // ── Identification ──────────────────────────────────────────────────────────
 //
 //   IRT models are identified only up to a reflection and a scale. We fix
-//   both by imposing sign constraints on two anchor firms:
+//   both by imposing sign constraints on two anchor firms' *first appearances*:
 //
-//     Halliburton       (HAL): theta[HAL, t] < 0  for all t  →  low-CSR anchor
-//     Abbott Labs       (ABT): theta[ABT, t] > 0  for all t  →  high-CSR anchor
+//     Halliburton (HAL): theta[HAL, first_t] < 0  →  low-CSR anchor
+//     Abbott Labs (ABT): theta[ABT, first_t] > 0  →  high-CSR anchor
 //
 //   HAL matches the negative anchor from Carroll, Primo & Richter (2016).
 //   ABT replaces MSFT/JNJ as the positive anchor because MSFT and JNJ have no
 //   KLD indicator data before 2001; ABT has full coverage for 1991–2018.
-//   The sign constraints are encoded directly in the parameter declarations
-//   below; Stan applies the appropriate Jacobian adjustments automatically.
+//
+//   The constraints are placed only on the first-year anchor scores; subsequent
+//   years are built via the NCP transition mechanism (see below). In practice
+//   the data keep both anchors firmly on their designated sides throughout.
 //
 //   Note: the scale of the theta distribution is determined by the item priors
 //   and the data. Scores are interval-scaled (differences are meaningful;
 //   ratios are not).
 //
+// ── Parameterization ────────────────────────────────────────────────────────
+//
+//   This model uses a *non-centered parameterization* (NCP) for the dynamic
+//   prior on theta and for the firm-level innovation SDs. The centered form
+//   of the dynamic prior creates a funnel geometry (sigma_global → sigma_firm
+//   → theta transitions) that causes HMC to hit max treedepth and produces
+//   near-zero E-BFMI. NCP decouples these dependencies:
+//
+//     sigma_firm[i]  = sigma_global * sigma_firm_raw[i]
+//                      sigma_firm_raw[i] ~ HalfNormal(0, 1)
+//
+//     theta[first_t] = sigma_init * z_init           (non-anchor firms)
+//                      z_init ~ Normal(0, 1)
+//
+//     theta[t]       = theta[t-1] + sigma_firm[i] * z_trans[k]
+//                      z_trans[k] ~ Normal(0, 1)
+//
+//   theta is then a deterministic function in transformed parameters, built
+//   sequentially from the z innovations. The anchor first-year scores are
+//   declared as constrained scalar parameters and enter directly.
+//
 // ── Computational notes ──────────────────────────────────────────────────────
 //
-//   This model has O(N_firm_years) + O(N_items) parameters and an O(N)
-//   likelihood, where N can be in the millions for the full KLD dataset. A
-//   few things to keep in mind:
-//
-//   1. Non-centered parameterization: the dynamic prior is written in centered
-//      form here for clarity. For very deep chains or slow mixing, switching
-//      the transition terms to a non-centered form (z ~ Normal(0,1),
-//      theta[curr] = theta[prev] + sigma_firm * z) can improve geometry.
-//
-//   2. Within-chain parallelism: the likelihood loop is the bottleneck. The
+//   1. Within-chain parallelism: the likelihood loop is the bottleneck. The
 //      reduce_sum() function (Stan 2.23+) can parallelize it across CPU cores
 //      within a single chain, giving a near-linear speedup. See the commented
 //      skeleton at the bottom of this file.
+//
+//   2. log_lik (LOO-CV): pointwise log-likelihoods are not stored here because
+//      for the full KLD dataset the N-length vector per draw causes memory
+//      exhaustion. To compute LOO, re-run with a generated quantities block
+//      added, or use moment matching on a subsample.
 //
 //   3. For exploratory runs or testing, use a temporal or firm-count subset
 //      of the data (see R/02-estimate.R for the `demo_mode` flag).
@@ -95,17 +110,14 @@ data {
 
   // ── dimensions ────────────────────────────────────────────────────────────
 
-  int<lower=1> N;           // total non-missing observations
-  int<lower=1> N_fy;        // total unique firm-year pairs
-  int<lower=1> N_fy_free;   // firm-year pairs NOT belonging to either anchor
-  int<lower=1> N_fy_hal;    // HAL (Halliburton) firm-year pairs  — low-CSR anchor
-  int<lower=1> N_fy_abt;    // ABT (Abbott Labs) firm-year pairs  — high-CSR anchor
-  int<lower=1> N_items;     // unique items (indicator × year combinations)
-  int<lower=1> N_firms;     // unique firms
+  int<lower=1> N;        // total non-missing observations
+  int<lower=1> N_fy;     // total unique firm-year pairs
+  int<lower=1> N_items;  // unique items (indicator × year combinations)
+  int<lower=1> N_firms;  // unique firms
 
   // ── observations ──────────────────────────────────────────────────────────
 
-  array[N] int<lower=0, upper=1> y;            // binary response (0/1)
+  array[N] int<lower=0, upper=1>    y;      // binary response (0/1)
   array[N] int<lower=1, upper=N_fy>    fy_obs; // firm-year index for obs n
   array[N] int<lower=1, upper=N_items> it_obs; // item index for obs n
 
@@ -114,62 +126,88 @@ data {
 
   array[N_fy] int<lower=1, upper=N_firms> fy_firm;
 
-  // ── index maps: anchor/free slots → full FY index ─────────────────────────
-  // These let us assemble theta from its three sub-vectors in transformed
-  // parameters without any branching in the likelihood.
+  // ── anchor first-year firm-years (for identification) ─────────────────────
+  // These are the fy_idx values of HAL's and ABT's first appearances.
+  // Only the first year is constrained; subsequent years follow from NCP
+  // transitions.
 
-  array[N_fy_free] int<lower=1, upper=N_fy> free_to_fy;
-  array[N_fy_hal]  int<lower=1, upper=N_fy> hal_to_fy;
-  array[N_fy_abt]  int<lower=1, upper=N_fy> abt_to_fy;
+  int<lower=1, upper=N_fy> hal_init_fy;  // HAL's first-year fy_idx
+  int<lower=1, upper=N_fy> abt_init_fy;  // ABT's first-year fy_idx
+
+  // ── non-anchor initial firm-years ─────────────────────────────────────────
+  // fy_idx values of all other firms' first appearances.
+
+  int<lower=0> N_init_other;
+  array[N_init_other] int<lower=1, upper=N_fy> other_init_fy;
 
   // ── dynamic model structure ───────────────────────────────────────────────
+  // Consecutive transitions: (prev, curr) pairs within the same firm,
+  // ordered chronologically within each firm so that theta[trans_prev[k]] is
+  // always set before theta[trans_curr[k]] in the transformed parameters loop.
 
-  // Initial firm-years: first time a firm appears in the data.
-  int<lower=1>                                   N_init;
-  array[N_init] int<lower=1, upper=N_fy>         init_fy;
-
-  // Consecutive transitions: (prev, curr) pairs within the same firm.
-  int<lower=0>                                   N_trans;
-  array[N_trans] int<lower=1, upper=N_fy>        trans_prev;
-  array[N_trans] int<lower=1, upper=N_fy>        trans_curr;
-  array[N_trans] int<lower=1, upper=N_firms>     trans_firm;
+  int<lower=0>                               N_trans;
+  array[N_trans] int<lower=1, upper=N_fy>    trans_prev;
+  array[N_trans] int<lower=1, upper=N_fy>    trans_curr;
+  array[N_trans] int<lower=1, upper=N_firms> trans_firm;
 
 }
 
 // ============================================================================
 parameters {
 
-  // ── latent CSR scores ─────────────────────────────────────────────────────
-  // Split into three sub-vectors so we can declare sign constraints on the
-  // anchor firms. Stan applies Jacobian adjustments for the truncation
-  // automatically.
+  // ── anchor first-year scores (constrained for identification) ─────────────
 
-  vector[N_fy_free]           theta_free; // unconstrained firm-years
-  vector<upper=0>[N_fy_hal]   theta_hal;  // HAL (Halliburton): constrained negative
-  vector<lower=0>[N_fy_abt]   theta_abt;  // ABT (Abbott Labs): constrained positive
+  real<upper=0> theta_hal_init;  // HAL's first year — constrained negative
+  real<lower=0> theta_abt_init;  // ABT's first year — constrained positive
+
+  // ── NCP innovations ───────────────────────────────────────────────────────
+  // These are standard-normal raw parameters. The actual theta values are
+  // built deterministically in transformed parameters.
+
+  vector[N_init_other] z_init;   // first-year innovations for non-anchor firms
+  vector[N_trans]      z_trans;  // year-to-year transition innovations
 
   // ── item parameters ───────────────────────────────────────────────────────
 
-  vector[N_items] alpha; // difficulty
-  vector[N_items] beta;  // discrimination
+  vector[N_items] alpha;  // difficulty
+  vector[N_items] beta;   // discrimination
 
-  // ── dynamic variance parameters ───────────────────────────────────────────
+  // ── NCP variance parameters ───────────────────────────────────────────────
 
-  vector<lower=1e-8>[N_firms] sigma_firm;   // per-firm innovation SD
-  real<lower=1e-8>            sigma_global; // hierarchical scale for sigma_firm
-  real<lower=1e-8>            sigma_init;   // SD for firms' first-year draw
+  vector<lower=0>[N_firms] sigma_firm_raw;  // NCP: sigma_firm = sigma_global * this
+  real<lower=0>            sigma_global;    // hierarchical scale for sigma_firm
+  real<lower=0>            sigma_init;      // SD for firms' first-year draw
 
 }
 
 // ============================================================================
 transformed parameters {
 
-  // Assemble the full theta vector in firm-year order. This is the quantity
-  // that enters the likelihood and the dynamic prior.
+  // Actual firm innovation SDs, recovered from the NCP decomposition.
+  vector<lower=0>[N_firms] sigma_firm = sigma_global * sigma_firm_raw;
+
+  // ── Build theta[N_fy] from NCP innovations ────────────────────────────────
+  //
+  // Order of construction:
+  //   1. Anchor first-year scores (constrained scalars set directly).
+  //   2. All other firms' first-year scores (sigma_init * z_init).
+  //   3. Consecutive transitions for all firms (theta[prev] + sigma_firm * z).
+  //
+  // The transition array is sorted (ticker, year_idx), so for each firm the
+  // earlier year is always populated before the later year — the loop is
+  // well-defined without any graph-topology checks.
+
   vector[N_fy] theta;
-  theta[free_to_fy] = theta_free;
-  theta[hal_to_fy]  = theta_hal;
-  theta[abt_to_fy]  = theta_abt;
+
+  theta[hal_init_fy] = theta_hal_init;
+  theta[abt_init_fy] = theta_abt_init;
+
+  if (N_init_other > 0)
+    theta[other_init_fy] = sigma_init * z_init;
+
+  for (k in 1:N_trans)
+    theta[trans_curr[k]] = theta[trans_prev[k]]
+                           + sigma_firm[trans_firm[k]] * z_trans[k];
 
 }
 
@@ -181,63 +219,24 @@ model {
   sigma_global ~ normal(0, 1);   // half-normal (positive constraint above)
   sigma_init   ~ normal(0, 1);   // half-normal
 
+  // ── NCP priors ────────────────────────────────────────────────────────────
+
+  sigma_firm_raw ~ normal(0, 1); // half-normal (positive constraint above)
+  z_init         ~ normal(0, 1);
+  z_trans        ~ normal(0, 1);
+
   // ── item priors ───────────────────────────────────────────────────────────
 
   alpha ~ normal(0, 5);
   beta  ~ normal(0, 2.5);
 
-  // ── hierarchical prior on firm innovation SDs ─────────────────────────────
-
-  sigma_firm ~ normal(0, sigma_global); // half-normal (positive constraint)
-
-  // ── dynamic prior on theta ────────────────────────────────────────────────
-
-  // First appearance: draw from a zero-centered normal.
-  // (For anchor firms, the constraint on theta makes this a truncated normal;
-  //  Stan accounts for the Jacobian automatically.)
-  theta[init_fy] ~ normal(0, sigma_init);
-
-  // Year-to-year transitions: random walk with firm-specific innovation SD.
-  for (k in 1:N_trans) {
-    theta[trans_curr[k]] ~ normal(theta[trans_prev[k]],
-                                  sigma_firm[trans_firm[k]]);
-  }
-
   // ── likelihood ────────────────────────────────────────────────────────────
 
   {
-    // Compute the linear predictor for every observation, then evaluate the
-    // Bernoulli-probit log-likelihood. Pulling this into a local block avoids
-    // allocating `mu` in the global scope.
-    // Vectorized Bernoulli-probit likelihood. Phi() can underflow to exactly
-    // 0 for |mu| > ~37 during extreme HMC proposals; this simply causes the
-    // proposal to be rejected (harmless). The initialization issue is handled
-    // by starting all chains at init = 0 on the unconstrained scale
-    // (see 02-estimate.R) so that mu ≈ 0 at startup and Phi(0) = 0.5.
     vector[N] mu;
-    for (n in 1:N) {
+    for (n in 1:N)
       mu[n] = beta[it_obs[n]] * theta[fy_obs[n]] - alpha[it_obs[n]];
-    }
     y ~ bernoulli(Phi(mu));
-  }
-
-}
-
-// ============================================================================
-generated quantities {
-
-  // ── log-likelihood (for LOO-CV) ───────────────────────────────────────────
-  // Storing pointwise log-likelihood enables posterior predictive checks and
-  // model comparison via the `loo` package without re-running the model.
-  //
-  // Memory note: this is an N-length vector per posterior draw, which can be
-  // large. For the full KLD dataset consider subsetting or dropping this block
-  // and recomputing offline if memory is a constraint.
-
-  vector[N] log_lik;
-  for (n in 1:N) {
-    real mu_n = beta[it_obs[n]] * theta[fy_obs[n]] - alpha[it_obs[n]];
-    log_lik[n] = bernoulli_lpmf(y[n] | Phi(mu_n));
   }
 
 }
