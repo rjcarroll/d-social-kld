@@ -323,10 +323,18 @@ message("  (Rough: assumes linear scaling in obs and iterations.)")
 
 # ── save fit ──────────────────────────────────────────────────────────────────
 #
-# Save before diagnostics so the fit is never lost to a downstream memory error.
+# The chain CSVs in output_dir are the primary saved output — they're written
+# incrementally by CmdStan during sampling and survive R crashes. We skip
+# fit$save_object() because serializing the full fit exceeds 16 GB RAM on this
+# machine. 03-extract.R reconstructs the fit from the CSVs directly.
 
-message(sprintf("[%s] Saving fit object...", Sys.time()))
-fit$save_object(file = "data/intermediate/stan-fit.rds")
+message(sprintf("[%s] Chain CSVs saved to data/intermediate/chains/.", Sys.time()))
+
+csv_files <- list.files("data/intermediate/chains", pattern = "\\.csv$",
+                        full.names = TRUE)
+message(sprintf("  %d chain files, %.1f GB total.",
+                length(csv_files),
+                sum(file.size(csv_files)) / 1e9))
 
 # ── basic diagnostics ─────────────────────────────────────────────────────────
 #
@@ -334,6 +342,9 @@ fit$save_object(file = "data/intermediate/stan-fit.rds")
 #   - No divergences (or very few: < 0.1% of post-warmup draws)
 #   - R-hat < 1.01 for all parameters
 #   - Bulk and tail ESS > 100 per chain (ideally > 400 total)
+#
+# We run diagnostic_summary() (cheap — reads sampler CSV columns only) and
+# check convergence on a manageable subset of parameters rather than all 120K.
 
 message(sprintf(
   "\n[%s] ── Sampler diagnostics ──────────────────────────────",
@@ -341,12 +352,20 @@ message(sprintf(
 ))
 fit$diagnostic_summary()
 
+# Spot-check convergence on the parameters we care about. Summarising all 120K
+# parameters at once would OOM on 16 GB; a targeted check on a few hundred
+# theta, alpha, beta, and the hyperparameters is sufficient to flag problems.
+diag_vars <- c(
+  grep("^theta\\[", fit$metadata()$stan_variables, value = TRUE)[1:100],
+  "alpha", "beta",
+  "sigma_global", "sigma_init"
+)
 diag_tbl <- fit$summary(
-  variables = NULL,
-  "mean", "sd", "rhat", "ess_bulk", "ess_tail"
+  variables = diag_vars,
+  "rhat", "ess_bulk", "ess_tail"
 )
 message(sprintf(
-  "R-hat range: [%.4f, %.4f]",
+  "R-hat range (spot check): [%.4f, %.4f]",
   min(diag_tbl$rhat, na.rm = TRUE),
   max(diag_tbl$rhat, na.rm = TRUE)
 ))

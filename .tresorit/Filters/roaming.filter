@@ -1,0 +1,4 @@
+# CmdStan chain CSVs — large (~14 GB), written continuously during multi-day
+# MCMC runs. Syncing these causes I/O contention and wastes bandwidth.
+# Recover from CSVs locally; final summary outputs sync normally.
+[Ignore] data/intermediate/chains
