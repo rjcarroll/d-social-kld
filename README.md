@@ -14,7 +14,7 @@ The measure is introduced in:
 Pre-computed scores are in [`data/output/`](data/output/). If you just want the
 numbers, start there. For the full model specification, estimation details, and
 key findings, see the
-[methodology page](https://robertjcarroll.com/portfolio/csr/methodology.html).
+[methodology page](https://robertjcarroll.com/dsocialkld/).
 If you want to reproduce the estimation, read on.
 
 ---
@@ -198,7 +198,7 @@ each, `adapt_delta = 0.9`) completed with clean diagnostics:
 - **E-BFMI**: 0.76–0.81 (well above the 0.3 concern threshold)
 - **Bulk ESS**: min 741, generally 2,000–26,000+
 
-See the [methodology page](https://robertjcarroll.com/portfolio/csr/methodology.html)
+See the [methodology page](https://robertjcarroll.com/dsocialkld/)
 for full details including anchor trajectory analysis and key findings.
 
 ---
@@ -239,5 +239,5 @@ If you use these scores, please cite the original paper:
 ## Questions and contributions
 
 Issues and pull requests are welcome. For questions about the methodology, see the
-[methodology page](https://robertjcarroll.com/portfolio/csr/methodology.html) or
+[methodology page](https://robertjcarroll.com/dsocialkld/) or
 the original paper. For questions about this codebase, open an issue.
