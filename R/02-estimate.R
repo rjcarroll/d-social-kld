@@ -352,27 +352,10 @@ message(sprintf(
 ))
 fit$diagnostic_summary()
 
-# Spot-check convergence on the parameters we care about. Summarising all 120K
-# parameters at once would OOM on 16 GB; a targeted check on a few hundred
-# theta, alpha, beta, and the hyperparameters is sufficient to flag problems.
-diag_vars <- c(
-  grep("^theta\\[", fit$metadata()$stan_variables, value = TRUE)[1:100],
-  "alpha", "beta",
-  "sigma_global", "sigma_init"
-)
-diag_tbl <- fit$summary(
-  variables = diag_vars,
-  "rhat", "ess_bulk", "ess_tail"
-)
-message(sprintf(
-  "R-hat range (spot check): [%.4f, %.4f]",
-  min(diag_tbl$rhat, na.rm = TRUE),
-  max(diag_tbl$rhat, na.rm = TRUE)
-))
-message(sprintf(
-  "Min bulk ESS: %.0f | Min tail ESS: %.0f",
-  min(diag_tbl$ess_bulk, na.rm = TRUE),
-  min(diag_tbl$ess_tail, na.rm = TRUE)
-))
+# R-hat and ESS spot checks are deferred to R/diagnostics.R, which reads the
+# chain CSVs column-selectively (via awk) to stay within 16 GB RAM. The full
+# fit object from model$sample() cannot compute summaries without OOM on the
+# 120K-parameter model.
+message("Run R/diagnostics.R for R-hat and ESS convergence checks.")
 
 message(sprintf("[%s] 02-estimate.R complete.", Sys.time()))

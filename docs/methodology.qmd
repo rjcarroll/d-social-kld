@@ -1,14 +1,12 @@
 ---
-title: "D-SOCIAL-KLD: Measuring Corporate Social Responsibility with Dynamic IRT"
+title: "D-SOCIAL-KLD: Methodology"
+subtitle: "Dynamic IRT measurement of corporate social responsibility"
 author: "Robert J. Carroll"
 format:
   html:
     toc: true
     toc-depth: 3
     number-sections: true
-    code-fold: true
-    theme: cosmo
-    self-contained: true
 bibliography: references.bib
 ---
 
@@ -96,17 +94,17 @@ These are wide enough to let the data drive the estimates while preventing extre
 
 IRT models are identified only up to a **reflection** (multiplying all $\theta$ by $-1$ and all $\beta$ by $-1$ gives the same likelihood) and a **scale** (the units of $\theta$ are arbitrary without a reference point).
 
-We fix both by constraining two **anchor firms**:
+We fix both by **pinning** two anchor firms' first-year scores to fixed values:
 
 | Anchor | Constraint | Rationale |
 |--------|-----------|-----------|
-| Halliburton (HAL) | $\theta_{\text{HAL},t_0} < 0$ | Consistently associated with environmental and governance controversies; used as the negative anchor in @carroll2016irt |
-| Abbott Laboratories (ABT) | $\theta_{\text{ABT},t_0} > 0$ | Consistently ranked among top corporate citizens in major CSR indices (DJSI, MSCI, Fortune) |
+| Halliburton (HAL) | $\theta_{\text{HAL},t_0} = -1$ | Consistently associated with environmental and governance controversies; used as the negative anchor in @carroll2016irt |
+| Abbott Laboratories (ABT) | $\theta_{\text{ABT},t_0} = +1$ | Consistently ranked among top corporate citizens in major CSR indices (DJSI, MSCI, Fortune) |
 
 where $t_0$ denotes each anchor firm's first appearance in the data.
-The constraint applies only to the first-year score; subsequent years evolve freely under the dynamic prior.
-This is sufficient to fix the reflection and scale: with the first year pinned, the direction of the latent dimension is determined throughout the panel via the random-walk continuity of $\theta$.
-The sign constraints are encoded directly in the Stan parameter declarations; Stan applies the appropriate Jacobian adjustments for the truncation automatically.
+The fixed values apply only to the first-year score; subsequent years evolve freely under the dynamic prior.
+Fixing at $\pm 1$ rather than merely constraining the sign eliminates a scale degeneracy: sign constraints allow the anchor scores to hover near zero, leaving the overall scale of $\theta$ and $\beta$ unidentified across chains.
+The fixed values are hard-coded in the `transformed parameters` block; the anchor scores are not sampled parameters.
 
 ::: {.callout-note}
 The original paper used Microsoft (MSFT) as the positive anchor.
@@ -133,17 +131,17 @@ Stan also provides:
 
 - **Automatic diagnostics**: divergent transitions, R-hat, bulk and tail effective sample size
 - **Parallel chains**: multiple chains run simultaneously, enabling both faster estimation and formal convergence assessment
-- **Pointwise log-likelihood**: can be computed in a `generated quantities` block for leave-one-out cross-validation via the `loo` package [@vehtari2017loo]. This block is omitted from the primary model file because storing an $N$-length vector per posterior draw exhausts memory for the full KLD dataset (~1.5M observations). LOO diagnostics should be computed on a subsample or via moment matching.
+- **Pointwise log-likelihood**: can be computed in a `generated quantities` block for leave-one-out cross-validation via the `loo` package [@vehtari2017loo]. This block is omitted from the primary model file because storing an $N$-length vector per posterior draw exhausts memory for the full KLD dataset (~3.3M observations). LOO diagnostics should be computed on a subsample or via moment matching.
 
 
 ### Implementation details
 
-The Stan model (`stan/dynamic_irt.stan`) uses several techniques to handle the scale of the problem:
+The Stan model uses several techniques to handle the scale of the problem:
 
 **Sparse data representation.**
 The KLD panel is highly sparse: firms enter and exit the database, and the set of indicators changes over time.
 Rather than passing the full firm $\times$ indicator $\times$ year array to Stan (which would be mostly NA), the R preprocessing scripts convert the data to a flat list of non-missing $(i, j, t, y)$ tuples.
-This reduces the data footprint from millions of potential cells to the ~500K--1.5M actually observed.
+This reduces the data footprint from millions of potential cells to the 3,273,013 actually observed.
 
 **Non-centered parameterization (NCP).**
 The centered form of the dynamic prior creates a funnel geometry in the joint posterior: when $\sigma_{\text{global}}$ is small, $\sigma_{\text{firm}}$ must be small, and when $\sigma_{\text{firm}}$ is small, consecutive $\theta$ values must be nearly identical. HMC must take extremely small leapfrog steps to navigate this narrow funnel, resulting in nearly all transitions hitting the maximum treedepth and near-zero E-BFMI values.
@@ -162,14 +160,95 @@ $$
 \theta_{i,t} = \theta_{i,t-1} + \sigma_{\text{firm},i} \cdot z^{\text{trans}}_{i,t}, \qquad z^{\text{trans}}_{i,t} \sim \text{Normal}(0,1)
 $$
 
-(with the exception of the anchor firms' first-year scores, which are declared as bounded scalar parameters as described in @sec-identification).
+(with the exception of the anchor firms' first-year scores, which are fixed constants---not sampled---as described in @sec-identification).
 The $\theta$ vector is assembled sequentially in the `transformed parameters` block by processing transitions in chronological order within each firm.
 Firm-years that follow gaps in the panel (i.e., years that are not consecutive transitions) receive the same $\sigma_{\text{init}} \cdot z$ initialization as first appearances.
 
 **Initialization.**
 All chains are initialized at zero on the unconstrained scale (`init = 0`).
-Under NCP, this places all $z$ innovations at zero, so every $\theta$ starts at zero (except HAL at $-1$ and ABT at $+1$, from the bounded-parameter transformations at `unconstrained = 0`).
+Under NCP, this places all $z$ innovations at zero, so every non-anchor $\theta$ starts at zero; the anchor scores are fixed at $\pm 1$ and are not sampled.
 This avoids the initialization failures that arise with random starts when the dynamic prior drives $\log p$ to $-\infty$.
+
+**Post-estimation memory management.**
+The full model has approximately 120,000 parameters, producing chain CSVs of ~3.4 GB each (13.6 GB total for 4 chains).
+Neither `cmdstanr::as_cmdstan_fit()` nor `data.table::fread()` can load these files on a 16 GB machine---the former exhausts memory building its internal data structure, and the latter overflows its header-line parser on the ~1.3 MB, 120,000-field column header.
+The pipeline converts the raw chain CSVs to **Apache Parquet** via Arrow, dropping the NCP internal parameters (`z_init`, `z_trans`, `sigma_firm_raw`) that are never needed downstream.
+This cuts the column count from ~120,000 to ~62,000 and file size to ~1.5 GB per chain.
+Diagnostics and score extraction then use Arrow's column-selective Parquet reads, loading only the parameters needed for each operation---typically a few hundred to a few thousand columns at a time, keeping peak memory well under 1 GB.
+
+
+### Estimation results
+
+The model was estimated with 4 chains, each running 1,000 warmup iterations and 2,500 sampling iterations (10,000 posterior draws total), with `adapt_delta = 0.9`.
+Wall-clock time was approximately 3.2 days on an Apple M-series machine (single-threaded per chain, 4 chains in parallel).
+
+#### Sampler diagnostics
+
+| Diagnostic | Result |
+|------------|--------|
+| Divergences | 0 across all 4 chains |
+| Max treedepth hits | 0 (max depth = 10) |
+| E-BFMI | 0.80, 0.78, 0.76, 0.81 |
+
+All E-BFMI values are well above the 0.3 concern threshold, confirming that the non-centered parameterization successfully resolves the funnel geometry that plagues the centered form of this model.
+
+#### Convergence
+
+Convergence was assessed via R-hat and effective sample size (ESS) on a stratified sample of 352 parameters spanning all parameter types---hyperparameters, item difficulties, item discriminations, firm-year scores, and firm-level innovation standard deviations:
+
+| Metric | Result |
+|--------|--------|
+| R-hat | Max 1.004 across all 352 parameters (all $\leq$ 1.01) |
+| Bulk ESS | Min 741 (`sigma_init`), generally 2,000--26,000+ |
+| Tail ESS | Min 1,263, generally 2,800--10,000+ |
+
+The lowest bulk ESS belongs to $\sigma_{\text{init}}$, the global initialization scale---a single scalar governing all firms' first-year draws.
+Even at 741, this represents adequate posterior exploration for a parameter with a simple unimodal marginal.
+All item parameters and firm-year scores have bulk ESS comfortably in the thousands.
+
+#### Anchor trajectories {#sec-anchors}
+
+The identification strategy pins each anchor firm's first-year score to a fixed value (HAL at $-1$, ABT at $+1$ in 1991); subsequent years evolve freely under the dynamic prior.
+The resulting trajectories are substantively revealing.
+
+**ABT** (the positive anchor) remains consistently positive throughout the panel, with posterior means ranging from 0.65 to 0.87---stable high-CSR performance over nearly three decades.
+
+**HAL** (the negative anchor) tells a more surprising story.
+Pinned at $-1$ in 1991, Halliburton's estimated CSR score turns positive by 1993 and remains in the 0.5--0.8 range for the remainder of the period.
+This is not a failure of identification---the first-year pin successfully sets the scale, and the model is free to let the trajectory evolve as the data dictate.
+What the data dictate is that even a firm selected as a low-CSR exemplar in the early 1990s improved substantially over the following decades.
+
+This pattern is not unique to Halliburton.
+Among all firms in the panel with at least 10 years of coverage, not a single one maintains a consistently negative CSR trajectory across the full 1991--2018 period.
+The most persistently negative firms (e.g., Saul Centers, DXP Enterprises, Cass Financial) enter the panel in 2003 or later, after KLD expanded its coverage universe to include smaller firms.
+The implication is clear: corporate social responsibility, as measured by KLD indicators, improved broadly and substantially over this period.
+A dynamic model captures this secular trend through the $\theta$ trajectories; a static cross-sectional analysis would miss it entirely.
+
+
+## Key findings
+
+Three results from the estimation merit emphasis.
+
+### The model works at scale
+
+Zero divergences, zero max-treedepth hits, healthy E-BFMI, and R-hat $\leq$ 1.004 across all spot-checked parameters.
+The non-centered parameterization eliminates the pathological funnel geometry that would otherwise cripple HMC at this scale.
+This is a model with over 120,000 parameters estimated from 3.3 million observations; clean diagnostics validate both the parameterization strategy and the choice of Stan over Gibbs sampling.
+
+### CSR improved broadly over 1991--2018
+
+The anchor trajectory analysis (see @sec-anchors) reveals that no firm with full-panel coverage maintains a persistently negative CSR score.
+Halliburton---chosen as a low-CSR exemplar based on its environmental and governance record---turns positive within two years of the 1991 starting point.
+This reflects the observable pattern that KLD strength indicators became more widely adopted and concern indicators became less prevalent over time.
+The dynamic model captures this secular improvement through the firm-year $\theta$ trajectories rather than absorbing it into the item parameters, making the trend visible and measurable.
+
+### Indicator informativeness varies substantially
+
+The estimated discrimination parameters ($\beta$) range widely across indicators.
+Some KLD items sharply separate high- from low-CSR firms; others contribute almost no discriminating power.
+This variation is precisely what the additive KLD Index cannot capture.
+By weighting all indicators equally, the index treats a near-universal governance checkbox the same as a rare environmental commitment that only the most responsible firms achieve.
+The IRT scores correct for this by data-adaptively downweighting uninformative items and amplifying informative ones.
 
 
 ## Data
@@ -182,16 +261,16 @@ KLD indicators are organized into categories (community, diversity, employee rel
 
 ### Preprocessing
 
-The cleaning pipeline (`R/01-clean.R`) handles several data-quality issues:
+The cleaning pipeline handles several data-quality issues:
 
 1. **Non-binary values**: a small number of indicator values exceed 1 (e.g., `HUM_str_num = 2`). These are clamped to 1.
-2. **Ticker disambiguation**: KLD's coverage expanded over time, and different firms occasionally share the same ticker symbol across coverage universes. The disambiguation uses `issuerid` where available (2017--2018) and deterministic numeric suffixes (`.2`, `.3`, ...) for earlier years. See `R/utils.R` for the full logic.
+2. **Ticker disambiguation**: KLD's coverage expanded over time, and different firms occasionally share the same ticker symbol across coverage universes. The disambiguation uses `issuerid` where available (2017--2018) and deterministic numeric suffixes (`.2`, `.3`, ...) for earlier years.
 3. **Time-varying indicator sets**: not all indicators appear in all years. Columns that are entirely NA in a given year are excluded from that year's item set.
 4. **Universe restriction**: the estimation sample is restricted to firms present in the KLD database by 2012, ensuring comparability with the original published scores.
 
 ### Scale and sparsity
 
-The full panel contains roughly 6,300 unique firms, 2,000+ indicator-year combinations, and 1.5 million non-missing observations.
+The full panel contains 6,324 unique firms, 2,068 indicator-year items, and 3,273,013 non-missing observations across 51,586 firm-years.
 Coverage is uneven: the early KLD years (1991--2000) include ~650 firms per year; later years include 3,000+.
 Many prominent firms (e.g., IBM, Coca-Cola) have surprisingly sparse indicator data in certain periods, reflecting KLD's evolving coverage universe rather than missing observations in the usual sense.
 
@@ -201,7 +280,7 @@ Many prominent firms (e.g., IBM, Coca-Cola) have surprisingly sparse indicator d
 ### Scores ($\theta$)
 
 The primary output is a posterior distribution over $\theta_{it}$ for each firm-year.
-The file `data/output/d-social-kld_scores.csv` reports the posterior mean, standard deviation, and percentiles.
+The scores file reports the posterior mean, standard deviation, and percentiles.
 
 Key properties:
 
@@ -211,7 +290,7 @@ Key properties:
 
 ### Item parameters ($\alpha$, $\beta$)
 
-The file `data/output/d-social-kld_item-params.csv` reports posterior summaries for each indicator's difficulty and discrimination.
+Posterior summaries for each indicator's difficulty and discrimination are also available.
 These are useful for understanding which KLD indicators are most informative about the latent CSR dimension and how the indicator set has evolved over time.
 
 

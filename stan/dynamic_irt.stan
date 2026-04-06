@@ -52,22 +52,21 @@
 // ── Identification ──────────────────────────────────────────────────────────
 //
 //   IRT models are identified only up to a reflection and a scale. We fix
-//   both by imposing sign constraints on two anchor firms' *first appearances*:
+//   both by pinning two anchor firms' first-year scores to fixed values:
 //
-//     Halliburton (HAL): theta[HAL, first_t] < 0  →  low-CSR anchor
-//     Abbott Labs (ABT): theta[ABT, first_t] > 0  →  high-CSR anchor
+//     Halliburton (HAL): theta[HAL, first_t] = -1  →  low-CSR anchor
+//     Abbott Labs (ABT): theta[ABT, first_t] = +1  →  high-CSR anchor
 //
 //   HAL matches the negative anchor from Carroll, Primo & Richter (2016).
 //   ABT replaces MSFT/JNJ as the positive anchor because MSFT and JNJ have no
 //   KLD indicator data before 2001; ABT has full coverage for 1991–2018.
 //
-//   The constraints are placed only on the first-year anchor scores; subsequent
-//   years are built via the NCP transition mechanism (see below). In practice
-//   the data keep both anchors firmly on their designated sides throughout.
+//   The fixed values are placed only on the first-year anchor scores;
+//   subsequent years evolve freely via the NCP transition mechanism (see
+//   below). Fixing at ±1 rather than using sign constraints eliminates the
+//   scale degeneracy that arises when anchors can hover near zero.
 //
-//   Note: the scale of the theta distribution is determined by the item priors
-//   and the data. Scores are interval-scaled (differences are meaningful;
-//   ratios are not).
+//   Scores are interval-scaled (differences are meaningful; ratios are not).
 //
 // ── Parameterization ────────────────────────────────────────────────────────
 //
@@ -88,7 +87,7 @@
 //
 //   theta is then a deterministic function in transformed parameters, built
 //   sequentially from the z innovations. The anchor first-year scores are
-//   declared as constrained scalar parameters and enter directly.
+//   fixed constants (not sampled parameters).
 //
 // ── Computational notes ──────────────────────────────────────────────────────
 //
@@ -155,11 +154,6 @@ data {
 // ============================================================================
 parameters {
 
-  // ── anchor first-year scores (constrained for identification) ─────────────
-
-  real<upper=0> theta_hal_init;  // HAL's first year — constrained negative
-  real<lower=0> theta_abt_init;  // ABT's first year — constrained positive
-
   // ── NCP innovations ───────────────────────────────────────────────────────
   // These are standard-normal raw parameters. The actual theta values are
   // built deterministically in transformed parameters.
@@ -199,8 +193,9 @@ transformed parameters {
 
   vector[N_fy] theta;
 
-  theta[hal_init_fy] = theta_hal_init;
-  theta[abt_init_fy] = theta_abt_init;
+  // Anchor first-year scores fixed for identification (reflection + scale).
+  theta[hal_init_fy] = -1.0;
+  theta[abt_init_fy] =  1.0;
 
   if (N_init_other > 0)
     theta[other_init_fy] = sigma_init * z_init;

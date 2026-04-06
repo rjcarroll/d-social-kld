@@ -12,8 +12,10 @@ The measure is introduced in:
 > 66–85. https://doi.org/10.1002/smj.2463
 
 Pre-computed scores are in [`data/output/`](data/output/). If you just want the
-numbers, start there. If you want to understand or reproduce the estimation, read
-on.
+numbers, start there. For the full model specification, estimation details, and
+key findings, see the
+[methodology page](https://robertjcarroll.com/portfolio/csr/methodology.html).
+If you want to reproduce the estimation, read on.
 
 ---
 
@@ -31,9 +33,9 @@ The **dynamic** extension allows a firm's latent CSR score to evolve from year
 to year rather than treating each year as an independent cross-section. This
 makes within-firm comparisons across time meaningful.
 
-The result is a continuous, interval-scaled score for each firm in each year it
-appears in the KLD data. Scores are centered roughly around zero; positive
-scores indicate above-median CSR, negative scores below-median.
+The result is a continuous, interval-scaled score for each of 51,586 firm-years
+across 6,324 firms (1991–2018). Scores are centered roughly around zero;
+positive scores indicate above-median CSR, negative scores below-median.
 
 ---
 
@@ -120,12 +122,19 @@ Rscript R/02-estimate.R   # many hours — see note below
 Rscript R/03-extract.R    # ~10 min
 ```
 
+After estimation, convert chain CSVs to Parquet for fast column-selective reads:
+
+```bash
+Rscript R/convert-to-parquet.R   # ~5 min
+Rscript R/diagnostics.R          # ~10 min (convergence checks)
+```
+
 **Runtime note**: The estimation step (`02-estimate.R`) is computationally
-intensive. On the full 1991–2018 dataset with 4 chains, expect runtimes of
-several hours to a few days depending on hardware. A `demo_mode` flag in
-`02-estimate.R` enables a fast subset run (1991–2012 only, fewer iterations)
-for testing the pipeline end-to-end before committing to a full run. The default
-demo subset is 1991–2000.
+intensive. On the full 1991–2018 dataset with 4 chains, expect approximately
+3 days on Apple M-series hardware. A `demo_mode` flag in `02-estimate.R`
+enables a fast subset run (fewer years and iterations) for testing the pipeline
+end-to-end before committing to a full run. The default demo subset is
+1991–2000.
 
 ---
 
@@ -155,12 +164,12 @@ partial pooling across firms. This allows the model to learn how quickly each
 firm's CSR position changes, while sharing information about the typical rate of
 change across the full sample.
 
-**Identification**: the latent scale is identified by constraining Halliburton
-(HAL) to have a negative score in all years (low-CSR anchor) and Abbott
-Laboratories (ABT) to have a positive score in all years (high-CSR anchor).
-HAL is the same negative anchor used in the original paper. ABT replaces MSFT
-as the positive anchor because MSFT and JNJ lack KLD indicator data before
-2001; ABT has complete coverage for 1991–2018.
+**Identification**: the latent scale is identified by pinning Halliburton
+(HAL) to θ = −1 and Abbott Laboratories (ABT) to θ = +1 in their first year
+of data (1991). Only the first-year scores are fixed; subsequent years evolve
+freely under the dynamic prior. HAL is the same negative anchor used in the
+original paper. ABT replaces MSFT as the positive anchor because MSFT and JNJ
+lack KLD indicator data before 2001; ABT has complete coverage for 1991–2018.
 
 The full model is in [`stan/dynamic_irt.stan`](stan/dynamic_irt.stan), which
 contains extensive inline documentation.
@@ -172,15 +181,25 @@ contains extensive inline documentation.
 | Feature | Carroll et al. (2016) | This repo |
 |---------|-----------------------|-----------|
 | Coverage | 1991–2012 | 1991–2018 |
+| Firms | ~3,000 | 6,324 |
+| Observations | ~1.5M | 3,273,013 |
 | Estimation engine | `MCMCpack::MCMCdynamicIRT1d` (Gibbs) | Stan (HMC/NUTS) |
-| Diagnostics | Limited | R-hat, ESS, LOO-CV |
+| Diagnostics | Limited | R-hat, ESS, E-BFMI, divergence checks |
 | Item parameters | Not reported | Included in output |
-| Chains | 1 | 4 (default) |
+| Chains | 1 | 4 |
 
-Stan's Hamiltonian Monte Carlo sampler is generally more efficient than Gibbs
-sampling — it produces less autocorrelated draws and provides richer convergence
-diagnostics (R-hat, bulk and tail effective sample size, divergence checks).
-The model specification is otherwise the same.
+### Latest estimation results
+
+The most recent full run (4 chains, 1,000 warmup + 2,500 sampling iterations
+each, `adapt_delta = 0.9`) completed with clean diagnostics:
+
+- **0 divergences** across all chains
+- **R-hat ≤ 1.004** across 352 spot-checked parameters (all ≤ 1.01)
+- **E-BFMI**: 0.76–0.81 (well above the 0.3 concern threshold)
+- **Bulk ESS**: min 741, generally 2,000–26,000+
+
+See the [methodology page](https://robertjcarroll.com/portfolio/csr/methodology.html)
+for full details including anchor trajectory analysis and key findings.
 
 ---
 
@@ -219,6 +238,6 @@ If you use these scores, please cite the original paper:
 
 ## Questions and contributions
 
-Issues and pull requests are welcome. For questions about the underlying data or
-methodology, the original paper and its online supplement are the primary
-references. For questions about this codebase, open an issue.
+Issues and pull requests are welcome. For questions about the methodology, see the
+[methodology page](https://robertjcarroll.com/portfolio/csr/methodology.html) or
+the original paper. For questions about this codebase, open an issue.

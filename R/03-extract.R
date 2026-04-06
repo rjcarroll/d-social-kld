@@ -13,25 +13,27 @@
 #
 # Both files report the posterior mean, SD, and a set of percentiles. The
 # scores file is the primary output for downstream research use.
+#
+# ── Memory strategy ──────────────────────────────────────────────────────────
+#
+# Reads from Parquet files (converted from chain CSVs by convert-to-parquet.R).
+# Arrow's column-selective reads keep memory low and are much faster than the
+# old awk-from-CSV approach. Theta is still processed in chunks.
 
 
 # ── setup ─────────────────────────────────────────────────────────────────────
 
 rm(list = ls())
 
+library(arrow)
 library(tidyverse)
-library(cmdstanr)
-library(posterior)   # for as_draws_df(), summarise_draws()
 
 # ── load ──────────────────────────────────────────────────────────────────────
 
-# Reconstruct the fit from chain CSVs (avoids loading a monolithic RDS that
-# exceeds available RAM). Only the CSV paths are needed; draws are read lazily
-# when we call fit$draws() below.
-csv_files <- list.files("data/intermediate/chains", pattern = "\\.csv$",
-                        full.names = TRUE)
-stopifnot("No chain CSVs found in data/intermediate/chains/" = length(csv_files) > 0)
-fit <- as_cmdstan_fit(csv_files)
+pq_files <- sort(list.files("data/intermediate/chains-parquet",
+                            pattern = "\\.parquet$", full.names = TRUE))
+stopifnot("No parquet files found — run convert-to-parquet.R first" =
+            length(pq_files) > 0)
 
 index_tbls  <- readRDS("data/intermediate/index-tables.rds")
 kld_meta    <- read_csv("data/intermediate/firm-year-level.csv",
@@ -41,15 +43,30 @@ firm_tbl <- index_tbls$firm_tbl   # ticker → firm_idx
 item_tbl <- index_tbls$item_tbl   # item_col × year_idx → item_idx
 fy_tbl   <- index_tbls$fy_tbl     # ticker × year_idx → fy_idx
 
+n_chains <- length(pq_files)
+message(sprintf("Found %d chain files.", n_chains))
+
+
+# ── helper: read selected columns from all chains ───────────────────────────
+#
+# Uses Arrow's column-selective Parquet reads, then row-binds across chains.
+# Returns a matrix with (n_draws_total × n_cols) — all chains concatenated.
+
+read_cols_flat <- function(pq_files, col_names_wanted) {
+  chain_mats <- lapply(pq_files, function(f) {
+    as.matrix(read_parquet(f, col_select = all_of(col_names_wanted)))
+  })
+  do.call(rbind, chain_mats)
+}
+
 
 # ── helper: posterior percentiles ────────────────────────────────────────────
 
 #' Summarise a draws matrix (iterations × parameters) into a tidy data frame.
 #' Operates column-wise to avoid the memory cost of pivot_longer on large draws.
-summarise_posterior <- function(draws_df, vars) {
-  draws_mat <- as.matrix(draws_df[, vars, drop = FALSE])
+summarise_posterior <- function(draws_mat, var_names) {
   tibble(
-    param  = vars,
+    param  = var_names,
     mean   = colMeans(draws_mat),
     sd     = apply(draws_mat, 2, sd),
     min    = apply(draws_mat, 2, min),
@@ -69,22 +86,20 @@ summarise_posterior <- function(draws_df, vars) {
 
 message("Extracting theta (firm-year scores)...")
 
-# theta has ~51K parameters × 10K draws — too large to load at once on 16 GB.
-# Process in chunks, summarise each, then combine.
-all_theta_vars <- fit$metadata()$stan_variables
-all_theta_vars <- grep("^theta$", all_theta_vars, value = TRUE)
+# CmdStan CSV uses dot notation: theta.1, theta.2, ...
+theta_csv_names <- paste0("theta.", seq_len(nrow(fy_tbl)))
 
-# Get the full list of theta[i] column names from one chain's metadata.
-theta_names <- paste0("theta[", seq_len(nrow(fy_tbl)), "]")
-
-chunk_size <- 5000L
-chunks     <- split(theta_names, ceiling(seq_along(theta_names) / chunk_size))
+chunk_size <- 2000L
+chunks     <- split(theta_csv_names, ceiling(seq_along(theta_csv_names) / chunk_size))
 
 theta_summary <- bind_rows(lapply(seq_along(chunks), function(i) {
   message(sprintf("  theta chunk %d/%d (%d params)...",
                   i, length(chunks), length(chunks[[i]])))
-  draws <- as_draws_df(fit$draws(variables = chunks[[i]]))
-  result <- summarise_posterior(draws, chunks[[i]])
+  draws <- read_cols_flat(pq_files, chunks[[i]])
+  # Use original bracket names for downstream parsing
+  bracket_names <- sub("^theta\\.", "theta[", chunks[[i]]) |>
+    paste0("]")
+  result <- summarise_posterior(draws, bracket_names)
   rm(draws); gc(verbose = FALSE)
   result
 }))
@@ -124,18 +139,21 @@ message(sprintf("Wrote %d firm-year score rows.", nrow(theta_summary)))
 
 message("Extracting alpha and beta (item parameters)...")
 
-# alpha and beta are much smaller (~2K each) — safe to load in one shot.
-alpha_draws <- as_draws_df(fit$draws("alpha"))
-alpha_vars  <- grep("^alpha\\[", names(alpha_draws), value = TRUE)
-alpha_summary <-
-  summarise_posterior(alpha_draws, alpha_vars) |>
+n_items <- nrow(item_tbl)
+
+# Alpha — small enough to load in one shot
+alpha_csv_names <- paste0("alpha.", seq_len(n_items))
+alpha_draws     <- read_cols_flat(pq_files, alpha_csv_names)
+alpha_bracket   <- paste0("alpha[", seq_len(n_items), "]")
+alpha_summary   <- summarise_posterior(alpha_draws, alpha_bracket) |>
   mutate(item_idx = as.integer(str_extract(param, "(?<=\\[)\\d+(?=\\])")))
 rm(alpha_draws); gc(verbose = FALSE)
 
-beta_draws <- as_draws_df(fit$draws("beta"))
-beta_vars  <- grep("^beta\\[",  names(beta_draws),  value = TRUE)
-beta_summary <-
-  summarise_posterior(beta_draws, beta_vars) |>
+# Beta
+beta_csv_names <- paste0("beta.", seq_len(n_items))
+beta_draws     <- read_cols_flat(pq_files, beta_csv_names)
+beta_bracket   <- paste0("beta[", seq_len(n_items), "]")
+beta_summary   <- summarise_posterior(beta_draws, beta_bracket) |>
   mutate(item_idx = as.integer(str_extract(param, "(?<=\\[)\\d+(?=\\])")))
 rm(beta_draws); gc(verbose = FALSE)
 
@@ -169,11 +187,11 @@ message("\n── Sanity checks ────────────────
 hal_check <- filter(theta_summary, ticker == "HAL")
 abt_check <- filter(theta_summary, ticker == "ABT")
 
-if (all(hal_check$mean < 0)) {
-  message("HAL (Halliburton): all posterior means negative. \u2713")
-} else {
-  warning("HAL has year(s) with positive posterior mean — check identification.")
-}
+hal_neg <- sum(hal_check$mean < 0)
+message(sprintf(
+  "HAL (Halliburton): %d/%d years with negative posterior mean (pinned at -1 in first year only).",
+  hal_neg, nrow(hal_check)
+))
 
 if (all(abt_check$mean > 0)) {
   message("ABT (Abbott Labs): all posterior means positive. \u2713")
