@@ -1,5 +1,9 @@
-# ----- data (all ignored; outputs committed once finalized) -----
-data/
+# ----- data (raw and intermediate ignored; outputs committed) -----
+data/*
+!data/output/
+data/output/*
+!data/output/*.csv
+!data/output/.gitkeep
 
 # ----- large MCMC output -----
 # Posterior draws are too large for GitHub; summary statistics in data/output/
